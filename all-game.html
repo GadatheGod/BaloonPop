@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎈 All Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    overflow: hidden;
+    background: #1a1a2e;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    cursor: crosshair;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Audio (Web Audio API, no files needed) ---
+let audioCtx;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function playPop(pitch = 1) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(600 * pitch, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.15);
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.15);
+}
+
+function playLevelUp() {
+  if (!audioCtx) return;
+  const notes = [523, 659, 784, 1047];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+    const t = audioCtx.currentTime + i * 0.12;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.2, t + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.4);
+  });
+}
+
+function playCombo() {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
+  gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.1);
+}
+
+// --- Game State ---
+let score = 0;
+let level = 1;
+let combo = 0;
+let comboTimer = 0;
+let comboDisplay = 0;
+let balloons = [];
+let popEffects = [];
+let floatTexts = [];
+let confetti = [];
+let trailParticles = [];
+let gameState = 'start';
+let levelUpTimer = 0;
+let spawnTimer = 0;
+let highScore = parseInt(localStorage.getItem('allgame_highscore') || '0');
+let totalPops = 0;
+let bestCombo = parseInt(localStorage.getItem('allgame_bestcombo') || '0');
+
+// --- Balloon Types ---
+const BALLOON_TYPES = {
+  normal: { points: 1, radiusRange: [28, 38], speedRange: [1, 3], weight: 60 },
+  gold:   { points: 3, radiusRange: [24, 32], speedRange: [2, 4], weight: 10 },
+  tiny:   { points: 1, radiusRange: [16, 22], speedRange: [3, 5], weight: 15 },
+  big:    { points: 2, radiusRange: [42, 52], speedRange: [0.6, 1.8], weight: 15 },
+};
+
+// --- Balloon Colors ---
+const PALETTE = [
+  { body: '#FF6B6B', dark: '#E04545', light: '#FF9E9E' },
+  { body: '#4ECDC4', dark: '#2EB8AD', light: '#7EDDD6' },
+  { body: '#FFE66D', dark: '#E6CC55', light: '#FFF0A3' },
+  { body: '#A8E6CF', dark: '#7BD4B3', light: '#C8F0DF' },
+  { body: '#FF8B94', dark: '#E06B74', light: '#FFB0B7' },
+  { body: '#DDA0DD', dark: '#C080C0', light: '#EEBCEE' },
+  { body: '#87CEEB', dark: '#6BB0D4', light: '#A8DCEF' },
+  { body: '#F4A460', dark: '#D88A4A', light: '#F8C088' },
+  { body: '#98D8C8', dark: '#78B8A8', light: '#B8E8D8' },
+  { body: '#F7DC6F', dark: '#DCC055', light: '#FAE898' },
+  { body: '#BB8FCE', dark: '#9A6FB0', light: '#D0B0E0' },
+  { body: '#85C1E9', dark: '#65A1C9', light: '#A5D1F0' },
+  { body: '#FF69B4', dark: '#E0458B', light: '#FF9CD0' },
+  { body: '#00CED1', dark: '#009E9F', light: '#50DFE0' },
+];
+
+const GOLD_PALETTE = [
+  { body: '#FFD700', dark: '#DAA520', light: '#FFF44F' },
+  { body: '#FFA500', dark: '#CC8400', light: '#FFD060' },
+  { body: '#FF8C00', dark: '#CC7000', light: '#FFB040' },
+];
+
+// --- Balloon Class ---
+class Balloon {
+  constructor(type = 'normal') {
+    const info = BALLOON_TYPES[type];
+    this.type = type;
+    const colorIdx = Math.floor(Math.random() * PALETTE.length);
+    const c = type === 'gold' ? GOLD_PALETTE[Math.floor(Math.random() * GOLD_PALETTE.length)] : PALETTE[colorIdx];
+    this.color = c;
+    this.points = info.points;
+    this.radius = info.radiusRange[0] + Math.random() * (info.radiusRange[1] - info.radiusRange[0]);
+    this.x = this.radius + Math.random() * (W - this.radius * 2);
+    this.y = this.radius + Math.random() * (H * 0.65);
+    const speedMult = 1 + level * 0.25;
+    const speed = (info.speedRange[0] + Math.random() * (info.speedRange[1] - info.speedRange[0])) * speedMult;
+    const angle = Math.random() * Math.PI * 2;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.stringLength = 30 + Math.random() * 20;
+    this.wobble = Math.random() * Math.PI * 2;
+    this.wobbleSpeed = 1.5 + Math.random() * 1.5;
+    this.wobbleAmp = 0.3 + Math.random() * 0.4;
+    this.alive = true;
+    this.opacity = 0;
+    this.fadeIn = true;
+    this.scale = 0.2;
+    this.popScale = 1;
+    this.trailTimer = 0;
+    this.deflating = false;
+    this.deflateScale = 1;
+    this.deflateTimer = 0;
+  }
+
+  update(dt) {
+    if (this.deflating) {
+      this.deflateTimer += dt;
+      this.deflateScale = Math.max(0, 1 - this.deflateTimer * 3);
+      this.opacity = Math.max(0, this.opacity - dt * 5);
+      if (this.deflateScale <= 0) {
+        this.alive = false;
+      }
+      return;
+    }
+
+    if (this.fadeIn) {
+      this.opacity = Math.min(1, this.opacity + dt * 3);
+      this.scale = Math.min(1, this.scale + dt * 4);
+      if (this.scale >= 1) this.fadeIn = false;
+    }
+
+    this.wobble += this.wobbleSpeed * dt;
+    this.trailTimer += dt;
+
+    this.x += this.vx * dt * 60;
+    this.y += this.vy * dt * 60;
+
+    // Bounce
+    if (this.x - this.radius < 0) { this.x = this.radius; this.vx = Math.abs(this.vx); }
+    if (this.x + this.radius > W) { this.x = W - this.radius; this.vx = -Math.abs(this.vx); }
+    if (this.y - this.radius < 0) { this.y = this.radius; this.vy = Math.abs(this.vy); }
+    if (this.y + this.radius + this.stringLength > H) { this.y = H - this.radius - this.stringLength; this.vy = -Math.abs(this.vy); }
+
+    // Trail particles
+    if (this.trailTimer > 0.08) {
+      this.trailTimer = 0;
+      const sway = Math.sin(this.wobble) * 8 * this.wobbleAmp;
+      trailParticles.push({
+        x: this.x + sway * 0.5,
+        y: this.y + this.radius * 0.8,
+        vx: -this.vx * 0.1 + (Math.random() - 0.5) * 0.5,
+        vy: -this.vy * 0.1 + Math.random() * 0.5,
+        life: 1,
+        size: 2 + Math.random() * 2,
+        color: this.color.body,
+      });
+    }
+  }
+
+  startDeflate() {
+    this.deflating = true;
+    this.deflateTimer = 0;
+    this.deflateScale = 1;
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.globalAlpha = this.opacity;
+
+    if (this.deflating) {
+      ctx.translate(this.x, this.y);
+      ctx.scale(this.deflateScale, this.deflateScale);
+      ctx.translate(-this.x, -this.y);
+    } else {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.scale(this.scale, this.scale);
+      ctx.translate(-this.x, -this.y);
+    }
+
+    const sway = Math.sin(this.wobble) * 8 * this.wobbleAmp;
+
+    // String
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.y + this.radius);
+    ctx.quadraticCurveTo(this.x + sway, this.y + this.radius + this.stringLength * 0.5, this.x + sway * 0.5, this.y + this.radius + this.stringLength);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Knot
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.y + this.radius);
+    ctx.lineTo(this.x - 3, this.y + this.radius + 6);
+    ctx.lineTo(this.x + 3, this.y + this.radius + 6);
+    ctx.closePath();
+    ctx.fillStyle = this.color.dark;
+    ctx.fill();
+
+    // Balloon body
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y, this.radius, this.radius * 1.15, 0, 0, Math.PI * 2);
+    const grad = ctx.createRadialGradient(this.x - this.radius * 0.3, this.y - this.radius * 0.4, this.radius * 0.1, this.x, this.y, this.radius);
+    grad.addColorStop(0, this.color.light);
+    grad.addColorStop(0.6, this.color.body);
+    grad.addColorStop(1, this.color.dark);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Shine
+    ctx.beginPath();
+    ctx.ellipse(this.x - this.radius * 0.25, this.y - this.radius * 0.35, this.radius * 0.15, this.radius * 0.25, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.ellipse(this.x - this.radius * 0.1, this.y - this.radius * 0.55, this.radius * 0.06, this.radius * 0.1, -0.3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fill();
+
+    // Gold sparkle
+    if (this.type === 'gold') {
+      const sparkle = Math.sin(Date.now() * 0.01) * 0.5 + 0.5;
+      ctx.beginPath();
+      ctx.arc(this.x + this.radius * 0.3, this.y - this.radius * 0.2, 3 + sparkle * 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${0.5 + sparkle * 0.5})`;
+      ctx.fill();
+    }
+
+    // Point indicator for gold/big
+    if (this.points > 1) {
+      ctx.font = `bold ${this.radius * 0.5}px "Segoe UI", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = this.type === 'gold' ? '#fff' : '#333';
+      ctx.fillText(this.points + 'x', this.x, this.y + 2);
+    }
+
+    ctx.restore();
+  }
+
+  hitTest(mx, my) {
+    const dx = mx - this.x;
+    const dy = my - this.y;
+    return dx * dx + dy * dy < (this.radius * 1.3) * (this.radius * 1.3);
+  }
+}
+
+// --- Pop Effect ---
+class PopEffect {
+  constructor(x, y, color, points) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.points = points;
+    this.radius = 5;
+    this.maxRadius = 60;
+    this.life = 1;
+    this.particles = [];
+    const count = 15 + points * 5;
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 2 + Math.random() * 5;
+      this.particles.push({
+        x: 0, y: 0,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1,
+        size: 3 + Math.random() * 5,
+        color: Math.random() > 0.3 ? color.body : color.light,
+        rotation: Math.random() * Math.PI * 2,
+        rotSpeed: (Math.random() - 0.5) * 10,
+      });
+    }
+    // Add some star particles
+    for (let i = 0; i < 4; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 4 + Math.random() * 3;
+      this.particles.push({
+        x: 0, y: 0,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1,
+        size: 6 + Math.random() * 4,
+        color: '#FFD700',
+        rotation: Math.random() * Math.PI * 2,
+        rotSpeed: (Math.random() - 0.5) * 8,
+        isStar: true,
+      });
+    }
+  }
+
+  update(dt) {
+    this.life -= dt * 2;
+    this.radius += dt * 150;
+    for (const p of this.particles) {
+      p.x += p.vx * dt * 60;
+      p.y += p.vy * dt * 60;
+      p.vy += dt * 4;
+      p.life -= dt * 1.8;
+      p.rotation += p.rotSpeed * dt;
+    }
+    this.particles = this.particles.filter(p => p.life > 0);
+    return this.life > 0;
+  }
+
+  draw(ctx) {
+    // Expanding ring
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,255,255,${this.life * 0.6})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Particles
+    for (const p of this.particles) {
+      ctx.save();
+      ctx.translate(this.x + p.x, this.y + p.y);
+      ctx.rotate(p.rotation);
+      ctx.globalAlpha = p.life;
+      if (p.isStar) {
+        this.drawStar(ctx, 0, 0, p.size * p.life);
+      } else {
+        ctx.beginPath();
+        ctx.arc(0, 0, p.size * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  drawStar(ctx, cx, cy, size) {
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const angle = (Math.PI * 2 / 5) * i - Math.PI / 2;
+      const x = cx + Math.cos(angle) * size;
+      const y = cy + Math.sin(angle) * size;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+      const innerAngle = angle + Math.PI / 5;
+      ctx.lineTo(cx + Math.cos(innerAngle) * size * 0.4, cy + Math.sin(innerAngle) * size * 0.4);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#FFD700';
+    ctx.fill();
+  }
+}
+
+// --- Float Text ---
+class FloatText {
+  constructor(x, y, text, color = '#FFD700', size = 28) {
+    this.x = x;
+    this.y = y;
+    this.text = text;
+    this.color = color;
+    this.size = size;
+    this.life = 1;
+    this.vy = -2.5;
+    this.vyAccel = 0.05;
+  }
+  update(dt) {
+    this.y += this.vy * dt * 60;
+    this.vy += this.vyAccel * dt * 60;
+    this.life -= dt * 1.2;
+    return this.life > 0;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, this.life);
+    ctx.font = `bold ${this.size * (1 + (1 - this.life) * 0.3)}px "Segoe UI", sans-serif`;
+    ctx.fillStyle = this.color;
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 3;
+    ctx.textAlign = 'center';
+    ctx.strokeText(this.text, this.x, this.y);
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.restore();
+  }
+}
+
+// --- Confetti ---
+class Confetti {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.vx = (Math.random() - 0.5) * 15;
+    this.vy = -5 - Math.random() * 10;
+    this.life = 1;
+    this.size = 4 + Math.random() * 6;
+    this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)].body;
+    this.rotation = Math.random() * Math.PI * 2;
+    this.rotSpeed = (Math.random() - 0.5) * 15;
+    this.shape = Math.random() > 0.5 ? 'rect' : 'circle';
+  }
+  update(dt) {
+    this.x += this.vx * dt * 60;
+    this.y += this.vy * dt * 60;
+    this.vy += dt * 3;
+    this.vx *= 0.99;
+    this.rotation += this.rotSpeed * dt;
+    this.life -= dt * 0.4;
+    return this.life > 0;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+    ctx.globalAlpha = this.life;
+    ctx.fillStyle = this.color;
+    if (this.shape === 'rect') {
+      ctx.fillRect(-this.size / 2, -this.size / 4, this.size, this.size / 2);
+    } else {
+      ctx.beginPath();
+      ctx.arc(0, 0, this.size / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// --- Spawn Logic ---
+function getTargetBalloonCount() {
+  return Math.min(4 + level, 18);
+}
+
+function getSpawnInterval() {
+  return Math.max(0.5, 2.2 - level * 0.12);
+}
+
+function pickBalloonType() {
+  const totalWeight = Object.values(BALLOON_TYPES).reduce((s, t) => s + t.weight, 0);
+  let r = Math.random() * totalWeight;
+  for (const [type, info] of Object.entries(BALLOON_TYPES)) {
+    r -= info.weight;
+    if (r <= 0) return type;
+  }
+  return 'normal';
+}
+
+function spawnBalloon() {
+  const type = pickBalloonType();
+  balloons.push(new Balloon(type));
+}
+
+// --- Drawing ---
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#87CEEB');
+  grad.addColorStop(0.4, '#B0E0FF');
+  grad.addColorStop(0.7, '#E0F4FF');
+  grad.addColorStop(1, '#F0F8FF');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ground
+  const groundGrad = ctx.createLinearGradient(0, H - 60, 0, H);
+  groundGrad.addColorStop(0, '#90EE90');
+  groundGrad.addColorStop(1, '#228B22');
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, H - 60, W, 60);
+
+  // Grass tufts
+  ctx.fillStyle = '#32CD32';
+  for (let i = 0; i < W; i += 30) {
+    const h = 8 + Math.sin(i * 0.1 + Date.now() * 0.001) * 4;
+    ctx.beginPath();
+    ctx.moveTo(i, H - 60);
+    ctx.lineTo(i + 5, H - 60 - h);
+    ctx.lineTo(i + 10, H - 60);
+    ctx.fill();
+  }
+
+  // Clouds
+  ctx.globalAlpha = 0.35;
+  for (let i = 0; i < 6; i++) {
+    const cx = ((i * 280 + Date.now() * 0.01) % (W + 300)) - 150;
+    const cy = 50 + i * 65 + Math.sin(Date.now() * 0.0005 + i) * 10;
+    drawCloud(cx, cy, 40 + i * 12);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCloud(x, y, size) {
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x, y, size * 0.5, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.4, y - size * 0.15, size * 0.4, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.8, y, size * 0.45, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.3, y + size * 0.1, size * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTrailParticles() {
+  for (const p of trailParticles) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = p.life * 0.3;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function updateTrailParticles(dt) {
+  for (let i = trailParticles.length - 1; i >= 0; i--) {
+    const p = trailParticles[i];
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+    p.life -= dt * 2;
+    if (p.life <= 0) trailParticles.splice(i, 1);
+  }
+}
+
+function drawHUD() {
+  ctx.save();
+
+  // Score
+  ctx.font = 'bold 40px "Segoe UI", sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 4;
+  ctx.strokeText(`🎈 ${score}`, W - 30, 55);
+  ctx.fillText(`🎈 ${score}`, W - 30, 55);
+
+  // Level
+  ctx.font = 'bold 24px "Segoe UI", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 3;
+  ctx.strokeText(`Level ${level}`, 30, 50);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`Level ${level}`, 30, 50);
+
+  // High Score
+  if (highScore > 0) {
+    ctx.font = '16px "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(`🏆 Best: ${highScore}  |  ⚡ Best Streak: ${bestCombo}`, 30, 75);
+  }
+
+  // Combo
+  if (combo > 1 && comboTimer > 0) {
+    const comboScale = 1 + Math.sin(Date.now() * 0.01) * 0.1;
+    ctx.save();
+    ctx.translate(W / 2, 100);
+    ctx.scale(comboScale, comboScale);
+    ctx.font = 'bold 32px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#FF4500';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3;
+    ctx.strokeText(`🔥 ${combo}x COMBO!`, 0, 0);
+    ctx.fillText(`🔥 ${combo}x COMBO!`, 0, 0);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawStartScreen() {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Floating balloons in background
+  for (let i = 0; i < 8; i++) {
+    const bx = W * 0.1 + (i * W * 0.12);
+    const by = H * 0.3 + Math.sin(Date.now() * 0.001 + i * 0.8) * 40;
+    const c = PALETTE[i % PALETTE.length];
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.ellipse(bx, by, 25, 30, 0, 0, Math.PI * 2);
+    ctx.fillStyle = c.body;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(bx, by + 30);
+    ctx.quadraticCurveTo(bx + 5, by + 50, bx, by + 60);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Title
+  ctx.font = 'bold 80px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#FFD700';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 5;
+  ctx.strokeText('🎈 ALL GAME 🎈', W / 2, H / 2 - 100);
+  ctx.fillText('🎈 ALL GAME 🎈', W / 2, H / 2 - 100);
+
+  // Subtitle
+  ctx.font = '26px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Pop the balloons! Click to pop them!', W / 2, H / 2 - 40);
+
+  // Balloon type legend
+  ctx.font = '18px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fillText('🔴 Normal (1x)  |  ⭐ Gold (3x)  |  ⚡ Tiny (fast)  |  🟣 Big (2x)', W / 2, H / 2);
+
+  // Play button
+  const btnW = 220, btnH = 65;
+  const btnX = W / 2 - btnW / 2, btnY = H / 2 + 60;
+  const pulse = 1 + Math.sin(Date.now() * 0.004) * 0.04;
+
+  ctx.save();
+  ctx.translate(W / 2, btnY + btnH / 2);
+  ctx.scale(pulse, pulse);
+  ctx.translate(-W / 2, -(btnY + btnH / 2));
+
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 32);
+  ctx.fillStyle = '#FF6B6B';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.font = 'bold 30px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('▶  PLAY', W / 2, btnY + btnH / 2);
+  ctx.restore();
+
+  // High score
+  if (highScore > 0) {
+    ctx.font = '20px "Segoe UI", sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText(`🏆 Best: ${highScore}  |  ⚡ Best Streak: ${bestCombo}`, W / 2, H / 2 + 160);
+  }
+
+  ctx.restore();
+}
+
+function drawLevelUp() {
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Confetti
+  for (const c of confetti) {
+    c.draw(ctx);
+  }
+
+  ctx.font = 'bold 65px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#FFD700';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 4;
+  ctx.strokeText(`LEVEL ${level}!`, W / 2, H / 2 - 30);
+  ctx.fillText(`LEVEL ${level}!`, W / 2, H / 2 - 30);
+
+  ctx.font = '26px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('🔥 Faster & more balloons incoming!', W / 2, H / 2 + 25);
+  ctx.restore();
+}
+
+// --- Game Loop ---
+let lastTime = 0;
+
+function gameLoop(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  drawBackground();
+
+  if (gameState === 'start') {
+    drawStartScreen();
+  } else if (gameState === 'playing') {
+    // Combo timer
+    if (comboTimer > 0) {
+      comboTimer -= dt;
+      if (comboTimer <= 0) {
+        combo = 0;
+      }
+    }
+
+    // Spawn
+    spawnTimer += dt;
+    if (spawnTimer >= getSpawnInterval() && balloons.length < getTargetBalloonCount()) {
+      spawnTimer = 0;
+      spawnBalloon();
+    }
+
+    // Update balloons
+    for (const b of balloons) {
+      b.update(dt);
+    }
+
+    // Remove dead balloons
+    balloons = balloons.filter(b => b.alive);
+
+    // Draw trail
+    updateTrailParticles(dt);
+    drawTrailParticles();
+
+    // Draw balloons
+    for (const b of balloons) {
+      b.draw(ctx);
+    }
+
+    // Update pop effects
+    popEffects = popEffects.filter(p => p.update(dt));
+    for (const p of popEffects) {
+      p.draw(ctx);
+    }
+
+    // Update float texts
+    floatTexts = floatTexts.filter(f => f.update(dt));
+    for (const f of floatTexts) {
+      f.draw(ctx);
+    }
+
+    // Update confetti
+    confetti = confetti.filter(c => c.update(dt));
+
+    drawHUD();
+  } else if (gameState === 'levelup') {
+    levelUpTimer -= dt;
+
+    for (const b of balloons) {
+      b.update(dt);
+    }
+    balloons = balloons.filter(b => b.alive);
+
+    updateTrailParticles(dt);
+    drawTrailParticles();
+
+    for (const b of balloons) {
+      b.draw(ctx);
+    }
+
+    popEffects = popEffects.filter(p => p.update(dt));
+    for (const p of popEffects) {
+      p.draw(ctx);
+    }
+
+    confetti = confetti.filter(c => c.update(dt));
+    for (const c of confetti) {
+      c.draw(ctx);
+    }
+
+    floatTexts = floatTexts.filter(f => f.update(dt));
+    for (const f of floatTexts) {
+      f.draw(ctx);
+    }
+
+    drawHUD();
+    drawLevelUp();
+
+    if (levelUpTimer <= 0) {
+      gameState = 'playing';
+    }
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// --- Input ---
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  if (gameState === 'start') {
+    const btnW = 220, btnH = 65;
+    const btnX = W / 2 - btnW / 2, btnY = H / 2 + 60;
+    if (mx >= btnX && mx <= btnX + btnW && my >= btnY && my <= btnY + btnH) {
+      initAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (gameState !== 'playing') return;
+
+  // Check balloon clicks (reverse order for top-most first)
+  for (let i = balloons.length - 1; i >= 0; i--) {
+    if (balloons[i].hitTest(mx, my)) {
+      const b = balloons[i];
+      b.startDeflate();
+
+      // Pop effect
+      popEffects.push(new PopEffect(b.x, b.y, b.color, b.points));
+
+      // Score text
+      const comboText = combo > 1 ? `+${b.points} (${combo}x)` : `+${b.points}`;
+      floatTexts.push(new FloatText(b.x, b.y - 20, comboText, b.points > 1 ? '#FF4500' : '#FFD700', b.points > 1 ? 36 : 28));
+
+      // Combo
+      combo++;
+      comboTimer = 2; // 2 seconds to chain
+      if (combo > 1) playCombo();
+
+      // Score
+      score += b.points;
+      totalPops++;
+
+      // Update high scores
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('allgame_highscore', highScore);
+      }
+      if (combo > bestCombo) {
+        bestCombo = combo;
+        localStorage.setItem('allgame_bestcombo', bestCombo);
+      }
+
+      // Sound
+      const pitch = 0.8 + Math.random() * 0.4;
+      setTimeout(() => playPop(pitch), 30);
+
+      // Level up check
+      if (score > 0 && score % 10 === 0) {
+        level++;
+        gameState = 'levelup';
+        levelUpTimer = 2;
+        playLevelUp();
+
+        // Confetti burst
+        for (let i = 0; i < 60; i++) {
+          confetti.push(new Confetti(W / 2, H / 2));
+        }
+      }
+      break;
+    }
+  }
+});
+
+// --- Start ---
+function startGame() {
+  score = 0;
+  level = 1;
+  combo = 0;
+  comboTimer = 0;
+  balloons = [];
+  popEffects = [];
+  floatTexts = [];
+  confetti = [];
+  trailParticles = [];
+  gameState = 'playing';
+  spawnTimer = 0;
+
+  const initialCount = Math.min(4 + level, 18);
+  for (let i = 0; i < initialCount; i++) {
+    setTimeout(() => spawnBalloon(), i * 300);
+  }
+}
+
+// --- Init ---
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
